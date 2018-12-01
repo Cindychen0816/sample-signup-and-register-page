@@ -1,60 +1,156 @@
-﻿(function () {
-    'use strict';
+﻿var config = require('config.json');
+var _ = require('lodash');
+var jwt = require('jsonwebtoken');
+var bcrypt = require('bcryptjs');
+var Q = require('q');
+var mongo = require('mongoskin');
+var db = mongo.db(config.connectionString, { native_parser: true });
+db.bind('users');
 
-    angular
-        .module('app')
-        .factory('UserService', Service);
+var service = {};
 
-    function Service($http, $q) {
-        var service = {};
+service.authenticate = authenticate;
+service.getById = getById;
+service.create = create;
+service.update = update;
+service.delete = _delete;
 
-        service.GetCurrent = GetCurrent;
-        service.GetAll = GetAll;
-        service.GetById = GetById;
-        service.GetByUsername = GetByUsername;
-        service.Create = Create;
-        service.Update = Update;
-        service.Delete = Delete;
+module.exports = service;
 
-        return service;
+function authenticate(username, password) {
+    var deferred = Q.defer();
 
-        function GetCurrent() {
-            return $http.get('/api/users/current').then(handleSuccess, handleError);
+    db.users.findOne({ username: username }, function (err, user) {
+        if (err) deferred.reject(err.name + ': ' + err.message);
+
+        if (user && bcrypt.compareSync(password, user.hash)) {
+            // authentication successful
+            deferred.resolve(jwt.sign({ sub: user._id }, config.secret));
+        } else {
+            // authentication failed
+            deferred.resolve();
         }
+    });
 
-        function GetAll() {
-            return $http.get('/api/users').then(handleSuccess, handleError);
+    return deferred.promise;
+}
+
+function getById(_id) {
+    var deferred = Q.defer();
+
+    db.users.findById(_id, function (err, user) {
+        if (err) deferred.reject(err.name + ': ' + err.message);
+
+        if (user) {
+            // return user (without hashed password)
+            deferred.resolve(_.omit(user, 'hash'));
+        } else {
+            // user not found
+            deferred.resolve();
         }
+    });
 
-        function GetById(_id) {
-            return $http.get('/api/users/' + _id).then(handleSuccess, handleError);
-        }
+    return deferred.promise;
+}
 
-        function GetByUsername(username) {
-            return $http.get('/api/users/' + username).then(handleSuccess, handleError);
-        }
+function create(userParam) {
+    var deferred = Q.defer();
 
-        function Create(user) {
-            return $http.post('/api/users', user).then(handleSuccess, handleError);
-        }
+    // validation
+    db.users.findOne(
+        { username: userParam.username },
+        function (err, user) {
+            if (err) deferred.reject(err.name + ': ' + err.message);
 
-        function Update(user) {
-            return $http.put('/api/users/' + user._id, user).then(handleSuccess, handleError);
-        }
+            if (user) {
+                // username already exists
+                deferred.reject('Username "' + userParam.username + '" is already taken');
+            } else {
+                createUser();
+            }
+        });
 
-        function Delete(_id) {
-            return $http.delete('/api/users/' + _id).then(handleSuccess, handleError);
-        }
+    function createUser() {
+        // set user object to userParam without the cleartext password
+        var user = _.omit(userParam, 'password');
 
-        // private functions
+        // add hashed password to user object
+        user.hash = bcrypt.hashSync(userParam.password, 10);
 
-        function handleSuccess(res) {
-            return res.data;
-        }
+        db.users.insert(
+            user,
+            function (err, doc) {
+                if (err) deferred.reject(err.name + ': ' + err.message);
 
-        function handleError(res) {
-            return $q.reject(res.data);
-        }
+                deferred.resolve();
+            });
     }
 
-})();
+    return deferred.promise;
+}
+
+function update(_id, userParam) {
+    var deferred = Q.defer();
+
+    // validation
+    db.users.findById(_id, function (err, user) {
+        if (err) deferred.reject(err.name + ': ' + err.message);
+
+        if (user.username !== userParam.username) {
+            // username has changed so check if the new username is already taken
+            db.users.findOne(
+                { username: userParam.username },
+                function (err, user) {
+                    if (err) deferred.reject(err.name + ': ' + err.message);
+
+                    if (user) {
+                        // username already exists
+                        deferred.reject('Username "' + req.body.username + '" is already taken')
+                    } else {
+                        updateUser();
+                    }
+                });
+        } else {
+            updateUser();
+        }
+    });
+
+    function updateUser() {
+        // fields to update
+        var set = {
+            firstName: userParam.firstName,
+            lastName: userParam.lastName,
+            username: userParam.username,
+        };
+
+        // update password if it was entered
+        if (userParam.password) {
+            set.hash = bcrypt.hashSync(userParam.password, 10);
+        }
+
+        db.users.update(
+            { _id: mongo.helper.toObjectID(_id) },
+            { $set: set },
+            function (err, doc) {
+                if (err) deferred.reject(err.name + ': ' + err.message);
+
+                deferred.resolve();
+            });
+    }
+
+    return deferred.promise;
+}
+
+function _delete(_id) {
+    var deferred = Q.defer();
+
+    db.users.remove(
+        { _id: mongo.helper.toObjectID(_id) },
+        function (err) {
+            if (err) deferred.reject(err.name + ': ' + err.message);
+
+            deferred.resolve();
+        });
+
+    return deferred.promise;
+}
